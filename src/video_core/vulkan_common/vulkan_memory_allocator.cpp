@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 #include <limits>
 #include <optional>
 #include <type_traits>
@@ -16,6 +20,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "common/fs/path_util.h"
 #include "common/literals.h"
 #include "common/logging.h"
 #include <ranges>
@@ -657,6 +662,43 @@ void LogMemoryStatistics(const Device& device) {
         LOG_INFO(Render_Vulkan, "VMA heap {}: usage {} MiB of budget {} MiB, VMA blocks {} MiB",
                  heap, budgets[heap].usage >> 20, budgets[heap].budget >> 20,
                  budgets[heap].statistics.blockBytes >> 20);
+    }
+    // A device heap past 85% of its budget: write every allocation (kind, size, usage flags) to
+    // the log folder, at most three times a session, to tell what fills VRAM when it is not
+    // textures (Ocarina of Time's Hyrule Castle Town on an 8 GB card: 5.7 GB in use, 1.9 GB of
+    // it images). EDEN_NX2_VMA_DUMP=0 turns it off.
+    static const bool dump_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_VMA_DUMP");
+        return value == nullptr || value[0] != '0';
+    }();
+    static u32 dumps{};
+    static auto last_dump = std::chrono::steady_clock::time_point{};
+    for (u32 heap = 0; heap < properties->memoryHeapCount && dump_enabled && dumps < 3; ++heap) {
+        const bool device_heap =
+            (properties->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        const VmaBudget& b = budgets[heap];
+        if (!device_heap || b.budget == 0 || b.usage * 100 < b.budget * 85 ||
+            properties->memoryHeaps[heap].size < (u64{1} << 30)) {
+            continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (dumps != 0 && now - last_dump < std::chrono::seconds{60}) {
+            break;
+        }
+        last_dump = now;
+        ++dumps;
+        char* json = nullptr;
+        vmaBuildStatsString(allocator, &json, VK_TRUE);
+        const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+                          ("vma_dump_" + std::to_string(dumps) + ".json");
+        if (json != nullptr) {
+            std::ofstream{path, std::ios::binary | std::ios::trunc} << json;
+            vmaFreeStatsString(allocator, json);
+        }
+        LOG_WARNING(Render_Vulkan,
+                    "VMA heap {} at {} of {} MiB: allocation map written to vma_dump_{}.json",
+                    heap, b.usage >> 20, b.budget >> 20, dumps);
+        break;
     }
 }
 
