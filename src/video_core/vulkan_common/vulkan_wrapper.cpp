@@ -12,6 +12,7 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "video_core/vulkan_common/driver_fault_guard.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -776,7 +777,8 @@ PipelineLayout Device::CreatePipelineLayout(const VkPipelineLayoutCreateInfo& ci
 
 Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache) const {
     VkPipeline object = VK_NULL_HANDLE;
-    auto const result = dld->vkCreateGraphicsPipelines(handle, cache, 1, &ci, nullptr, &object);
+    auto const result =
+        GuardedCreateGraphicsPipelines(dld->vkCreateGraphicsPipelines, handle, cache, &ci, &object);
     // Adreno 5xx drivers do not properly return when a graphics pipeline fails to be created
     // Some (unkown) Mali drivers also do not properly return
     // This result code is out of spec, but should be handled as "kinda working"
@@ -789,7 +791,7 @@ Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, 
 Pipeline Device::CreateComputePipeline(const VkComputePipelineCreateInfo& ci,
                                        VkPipelineCache cache) const {
     VkPipeline object;
-    Check(dld->vkCreateComputePipelines(handle, cache, 1, &ci, nullptr, &object));
+    Check(GuardedCreateComputePipelines(dld->vkCreateComputePipelines, handle, cache, &ci, &object));
     return Pipeline(object, handle, *dld);
 }
 

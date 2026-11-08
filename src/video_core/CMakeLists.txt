@@ -261,6 +261,8 @@ add_library(video_core STATIC
     vulkan_common/vulkan_memory_allocator.h
     vulkan_common/vulkan_surface.cpp
     vulkan_common/vulkan_surface.h
+    vulkan_common/driver_fault_guard.cpp
+    vulkan_common/driver_fault_guard.h
     vulkan_common/vulkan_wrapper.cpp
     vulkan_common/vulkan_wrapper.h
     vulkan_common/nsight_aftermath_tracker.cpp

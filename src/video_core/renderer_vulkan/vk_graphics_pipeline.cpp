@@ -2112,7 +2112,8 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
 
 bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
     // The driver crashed on this pipeline's libraries before: build it monolithic.
-    if (GplCrashGuard::IsBlocked(GplCrashGuard::Kind::Pipeline, key.Hash())) {
+    if (GplCrashGuard::SessionDisabled() ||
+        GplCrashGuard::IsBlocked(GplCrashGuard::Kind::Pipeline, key.Hash())) {
         return false;
     }
     PipelineStates states;

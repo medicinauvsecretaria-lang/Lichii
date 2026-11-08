@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <atomic>
 #include <map>
 #include <string>
 #include <unordered_set>
@@ -14,6 +15,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "video_core/renderer_vulkan/gpl_crash_guard.h"
+#include "video_core/vulkan_common/driver_fault_guard.h"
 
 namespace Vulkan::GplCrashGuard {
 namespace {
@@ -32,6 +34,7 @@ struct State {
     std::ofstream journal;
     std::mutex journal_mutex;
     std::mutex serial_mutex;
+    std::atomic<bool> session_disabled{};
 
     State() {
         const char* const env = std::getenv("EDEN_NX2_GPL_GUARD");
@@ -70,7 +73,8 @@ struct State {
                 } catch (...) {
                     continue; // a line cut short by the crash
                 }
-                open_calls[{kind, id}] += mark == 'B' ? 1 : -1;
+                // F: a fault the driver guard caught; blocked like an unfinished call.
+                open_calls[{kind, id}] += mark == 'B' ? 1 : (mark == 'F' ? 1000 : -1);
             }
         }
         size_t newly_blocked{};
@@ -126,6 +130,10 @@ bool LibrariesAllowed() {
     return Get().allowed;
 }
 
+bool SessionDisabled() {
+    return Get().session_disabled.load(std::memory_order_relaxed);
+}
+
 bool IsBlocked(Kind kind, u64 id) {
     State& state = Get();
     return state.enabled && state.blocked.contains(Combine(kind, id));
@@ -140,13 +148,25 @@ Scope::Scope(Kind kind_, u64 id_) : kind{kind_}, id{id_} {
         serial.emplace(state.serial_mutex);
     }
     active = true;
+    vk::TakeThreadDriverFault(); // a fault outside this scope belongs to someone else
     state.Write('B', kind, id);
 }
 
 Scope::~Scope() {
-    if (active) {
-        Get().Write('E', kind, id);
+    if (!active) {
+        return;
     }
+    State& state = Get();
+    if (vk::TakeThreadDriverFault()) {
+        // Caught in the driver: remembered for next sessions, libraries off for this one.
+        state.Write('F', kind, id);
+        state.session_disabled.store(true, std::memory_order_relaxed);
+        LOG_WARNING(Render_Vulkan,
+                    "Nx2Perf gpl guard: driver fault in {} {:016x}; shader libraries are off "
+                    "until restart and it is built monolithic from now on",
+                    kind == Kind::Library ? "library" : "pipeline", id);
+    }
+    state.Write('E', kind, id);
 }
 
 } // namespace Vulkan::GplCrashGuard

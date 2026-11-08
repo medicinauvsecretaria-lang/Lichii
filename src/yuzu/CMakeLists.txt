@@ -180,6 +180,8 @@ add_executable(yuzu
 
     main.cpp
     nx2_switches.h
+    crash_report.cpp
+    crash_report.h
 
     multiplayer/chat_room.cpp
     multiplayer/chat_room.h

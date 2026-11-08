@@ -33,6 +33,10 @@ enum class Kind : char {
 /// False when libraries must not be used at all (too many crashes).
 bool LibrariesAllowed();
 
+/// True after the driver faulted inside a guarded call this session (caught, see
+/// vk::GuardedCreateGraphicsPipelines): new pipelines are built monolithic until restart.
+bool SessionDisabled();
+
 /// True when this library or pipeline crashed the driver before and must be built monolithic.
 bool IsBlocked(Kind kind, u64 id);
 
