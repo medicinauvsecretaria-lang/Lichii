@@ -83,8 +83,8 @@ using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
 
 constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
-constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
-constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
+constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 32; // rx6600-r5500: save driver cache more often so a crash loses less
+constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 10;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
 
 template <typename Container>
@@ -1871,7 +1871,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     if (!pipeline) {
         return nullptr;
     }
-    constexpr auto save_interval = std::chrono::seconds{15};
+    constexpr auto save_interval = std::chrono::seconds{5};
     if (used_this_session.insert(pipeline.get()).second &&
         std::chrono::steady_clock::now() - used_pipelines_saved > save_interval) {
         SaveUsedPipelines();
