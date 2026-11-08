@@ -61,6 +61,18 @@ size_t GetStreamBufferSize(const Device& device) {
                 return Common::AlignUp(heap_size * 3 / 4, MAX_ALIGNMENT);
             }
         }
+        // A discrete card without Resizable BAR has a 256 MiB device-local host-visible heap
+        // (RX 6600: 231 MiB budget). AMD's driver puts its descriptor pools and command memory
+        // there, and a 128 MiB stream buffer left it ~100 MiB: entering Ocarina of Time's Hyrule
+        // Castle Town the heap reached 231 of 231 MiB, and vkCreateDescriptorPool aborted the
+        // process inside amdvlk64.dll (every crash dump, r3 to r5.1). Take a quarter of the heap.
+        VkDeviceSize bar_size = 0;
+        ForEachDeviceLocalHostVisibleHeap(device, [&bar_size](size_t, VkMemoryHeap& heap) {
+            bar_size = (std::max)(bar_size, heap.size);
+        });
+        if (!device.IsIntegrated() && bar_size != 0 && bar_size <= 2 * MAX_STREAM_BUFFER_SIZE) {
+            return Common::AlignUp(bar_size / 4, MAX_ALIGNMENT);
+        }
         return MAX_STREAM_BUFFER_SIZE;
     }
 
