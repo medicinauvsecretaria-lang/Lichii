@@ -446,7 +446,48 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VkMemoryPropertyFlags property_flags{};
 
     if (!CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info)) {
-        vk::Check(vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info));
+        VkResult result = vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // Over the device memory budget (OoT's Hyrule Castle Town on an 8 GB RX 6600): the
+            // exception this threw ended the session. Like images, go over the budget first and
+            // let the driver page, then fall back to host memory, which is slower but valid.
+            pressure_events.fetch_add(1, std::memory_order_relaxed);
+            VmaAllocationCreateInfo relaxed = alloc_ci;
+            relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+            if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+                VmaAllocationCreateInfo host = relaxed;
+                host.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+                host.preferredFlags = 0;
+                host.memoryTypeBits = 0;
+                result = vmaCreateBuffer(allocator, &ci, &host, &handle, &allocation, &alloc_info);
+            }
+            static u32 logged{};
+            if (logged++ < 32) {
+                LOG_WARNING(Render_Vulkan,
+                            "Buffer of {} bytes is over the device memory budget; {}", ci.size,
+                            result == VK_SUCCESS ? "allocated past the budget or in host memory"
+                                                 : "no memory left");
+                // Which heap filled up, and how much of it this process holds.
+                std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+                vmaGetHeapBudgets(allocator, budgets.data());
+                const VkPhysicalDeviceMemoryProperties* props{};
+                vmaGetMemoryProperties(allocator, &props);
+                for (u32 heap = 0; heap < props->memoryHeapCount; ++heap) {
+                    LOG_WARNING(Render_Vulkan,
+                                "  heap {} ({}): used {} MiB of budget {} MiB, allocated {} MiB, "
+                                "{} allocations",
+                                heap,
+                                (props->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                                    ? "device"
+                                    : "host",
+                                budgets[heap].usage >> 20, budgets[heap].budget >> 20,
+                                budgets[heap].statistics.blockBytes >> 20,
+                                budgets[heap].statistics.allocationCount);
+                }
+            }
+        }
+        vk::Check(result);
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 

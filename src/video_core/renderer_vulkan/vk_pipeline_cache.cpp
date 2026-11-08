@@ -1963,23 +1963,10 @@ void PipelineCache::EvictUnusedPipelines() {
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
-    // rx6600-r5500: 27000 frames (15 min at 30 fps) instead of 9000, and nothing is evicted while
-    // fewer than 3000 pipelines are built (~1.35 GB of driver memory). Walking back to an area
-    // five minutes later rebuilt its pipelines, and every rebuild is a driver call that can stall
-    // or, on AMD's Windows driver, crash. EDEN_NX2_EVICT_FRAMES=<n> overrides the frame count.
-    static const u64 EvictAfterFrames = [] {
-        const char* const value = std::getenv("EDEN_NX2_EVICT_FRAMES");
-        if (value != nullptr && *value != '\0') {
-            char* end = nullptr;
-            const unsigned long long parsed = std::strtoull(value, &end, 10);
-            if (end != value && *end == '\0' && parsed >= 600) {
-                return static_cast<u64>(parsed);
-            }
-        }
-        return u64{27000};
-    }();
-    constexpr size_t KeepBuiltPipelines = 3000;
-    if (frame_count <= EvictAfterFrames || graphics_cache.size() < KeepBuiltPipelines) {
+    // Kept at 9000 frames (r5): r4 kept up to 3000 built pipelines (~1.35 GB of driver memory),
+    // which an 8 GB card could not spare in Hyrule Castle Town.
+    constexpr u64 EvictAfterFrames = 9000;
+    if (frame_count <= EvictAfterFrames) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
