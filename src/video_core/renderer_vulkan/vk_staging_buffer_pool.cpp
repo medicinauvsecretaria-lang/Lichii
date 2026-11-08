@@ -142,7 +142,25 @@ void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
 void StagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
 
-    ReleaseCache(MemoryUsage::DeviceLocal);
+    // Device local staging buffers (ASTC to BC3 outputs, compute scratch) are freed every frame
+    // past two idle ones per size. The sweep below visits one size class every 64 frames and frees
+    // at most 16 buffers there, so the thousands a burst of new textures created (Ocarina of
+    // Time's Hyrule Castle Town: ~2500 textures in a few seconds) held gigabytes of VRAM for
+    // minutes, until the AMD driver ran out of device memory and aborted.
+    for (StagingBuffers& level : device_local_cache) {
+        auto& entries = level.entries;
+        if (entries.size() <= 2) {
+            continue;
+        }
+        size_t idle = 0;
+        std::erase_if(entries, [this, &idle](const StagingBuffer& entry) {
+            return !entry.deferred && scheduler.IsFree(entry.tick) && ++idle > 2;
+        });
+        level.delete_index = 0;
+        if (level.iterate_index > entries.size()) {
+            level.iterate_index = 0;
+        }
+    }
     ReleaseCache(MemoryUsage::Upload);
     ReleaseCache(MemoryUsage::Download);
 }
