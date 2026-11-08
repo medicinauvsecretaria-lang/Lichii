@@ -8,6 +8,7 @@
 #include <limits>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <optional>
 #include <set>
@@ -1250,6 +1251,35 @@ void UseBc3ForSwitch2OnSmallCards(const Device& device) {
                 "Set EDEN_NX2_KEEP_ASTC=1 to keep them uncompressed",
                 memory >> 20);
     Settings::SetAstcRecompressionOverride(Settings::AstcRecompression::Bc3);
+}
+} // Anonymous namespace
+
+namespace {
+/// Bytes of an RGBA8 ASTC decode image with these dimensions.
+u64 TranscodeBytes(u32 width, u32 height, u32 levels, u32 layers) {
+    u64 bytes{};
+    for (u32 level = 0; level < levels; ++level) {
+        bytes += u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
+    }
+    return bytes * layers;
+}
+
+/// Most decode image memory the GPU may still be working on (EDEN_NX2_ASTC_INFLIGHT_MIB,
+/// default 384). Entering Hyrule Castle Town, Ocarina of Time creates ~2500 textures within a
+/// few frames; every ASTC one was decoded at once into its own RGBA8 image, and those took VRAM
+/// from 0.5 to 5.8 GB on an 8 GB RX 6600 until the GPU caught up (out of device memory, then a
+/// crash). Past this the decode waits for the oldest decodes to finish instead.
+u64 MaxInFlightTranscodeBytes() {
+    static const u64 bytes = [] {
+        if (const char* value = std::getenv("EDEN_NX2_ASTC_INFLIGHT_MIB")) {
+            const u64 mib = std::strtoull(value, nullptr, 10);
+            if (mib >= 64) {
+                return mib << 20;
+            }
+        }
+        return u64{384} << 20;
+    }();
+    return bytes;
 }
 } // Anonymous namespace
 
@@ -2903,6 +2933,7 @@ void TextureCacheRuntime::TickFrame() {
     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
         PendingTranscode& done = pending_transcodes.front();
         const u64 bytes = decode_bytes(done);
+        in_flight_transcode_bytes -= (std::min)(in_flight_transcode_bytes, bytes);
         if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
             done.unused_frames = 0;
             free_bytes += bytes;
@@ -5010,6 +5041,32 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         pending = std::move(*reusable);
         free_transcodes.erase(reusable);
     } else {
+        // Bound the decode memory in flight: wait for the oldest decodes (the GPU does them in
+        // well under a millisecond each) rather than let a burst of new textures fill VRAM.
+        const u64 new_bytes = TranscodeBytes(width, height, levels, layers);
+        if (in_flight_transcode_bytes + new_bytes > MaxInFlightTranscodeBytes() &&
+            !pending_transcodes.empty()) {
+            free_transcodes.clear();
+            const auto wait_begin = std::chrono::steady_clock::now();
+            while (!pending_transcodes.empty() &&
+                   in_flight_transcode_bytes + new_bytes > MaxInFlightTranscodeBytes()) {
+                PendingTranscode& oldest = pending_transcodes.front();
+                scheduler.Wait(oldest.tick);
+                in_flight_transcode_bytes -= (std::min)(
+                    in_flight_transcode_bytes,
+                    TranscodeBytes(oldest.width, oldest.height, oldest.levels, oldest.layers));
+                pending_transcodes.pop_front();
+            }
+            if (++transcode_waits <= 16 || transcode_waits % 256 == 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Nx2Perf ASTC: waited {:.1f} ms for earlier decodes to keep their memory "
+                         "under {} MiB ({} waits)",
+                         std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - wait_begin)
+                             .count(),
+                         MaxInFlightTranscodeBytes() >> 20, transcode_waits);
+            }
+        }
         const VkImageCreateInfo decode_ci{
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .pNext = nullptr,
@@ -5116,6 +5173,8 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     });
     image.UploadMemory(output.buffer, output.offset, copies);
     pending.tick = scheduler.CurrentTick();
+    in_flight_transcode_bytes +=
+        TranscodeBytes(pending.width, pending.height, pending.levels, pending.layers);
     pending_transcodes.push_back(std::move(pending));
 }
 
