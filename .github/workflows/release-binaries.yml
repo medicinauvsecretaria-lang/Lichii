@@ -287,8 +287,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # /Zd: line tables only, enough for crash reports to name the function and line.
-          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin /Zd ${{ matrix.march }}"
+          # -gline-tables-only: line tables only, enough for crash reports to name the function and line.
+          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin /clang:-gline-tables-only ${{ matrix.march }}"
           if [ -n '${{ matrix.profile }}' ]; then
             flags+=" -fprofile-use=$(cygpath -m "$PWD/${{ matrix.profile }}")"
             flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"
