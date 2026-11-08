@@ -5,6 +5,7 @@
 #include <exception>
 
 #include "common/logging.h"
+#include "video_core/renderer_vulkan/gpl_crash_guard.h"
 #include "video_core/renderer_vulkan/vk_pipeline_library.h"
 
 namespace Vulkan {
@@ -68,9 +69,17 @@ std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(
     const auto begin = std::chrono::steady_clock::now();
     std::shared_ptr<const GplLibrary> library;
     try {
-        library = std::make_shared<const GplLibrary>(build());
-        if (!library->pipeline) {
-            library.reset();
+        // A library the driver crashed on in an earlier session is not built again: its
+        // pipelines fall back to monolithic ones (GplCrashGuard). The key holds a render pass
+        // handle that changes between sessions, so the guard names the library after its
+        // program hash and part instead.
+        const u64 guard_id = GplCrashGuard::LibraryId(part, name);
+        if (!GplCrashGuard::IsBlocked(GplCrashGuard::Kind::Library, guard_id)) {
+            const GplCrashGuard::Scope guard{GplCrashGuard::Kind::Library, guard_id};
+            library = std::make_shared<const GplLibrary>(build());
+            if (!library->pipeline) {
+                library.reset();
+            }
         }
     } catch (const std::exception& exception) {
         LOG_ERROR(Render_Vulkan, "Nx2Perf gpl: {} library {:016x} failed: {}", PART_NAMES[index],

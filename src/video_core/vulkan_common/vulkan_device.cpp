@@ -27,6 +27,7 @@
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "video_core/renderer_vulkan/gpl_crash_guard.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -1230,7 +1231,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
         const char* value = std::getenv("EDEN_NX2_GPL");
         return value && *value && *value != '0';
     }();
-    if (graphics_pipeline_library_requested &&
+    // GplCrashGuard switches libraries off after the driver crashed in them too often.
+    if (graphics_pipeline_library_requested && GplCrashGuard::LibrariesAllowed() &&
         supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
         supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
         loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);

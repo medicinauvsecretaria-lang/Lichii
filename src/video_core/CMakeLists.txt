@@ -171,6 +171,8 @@ add_library(video_core STATIC
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
     renderer_vulkan/pipeline_build.h
+    renderer_vulkan/gpl_crash_guard.cpp
+    renderer_vulkan/gpl_crash_guard.h
     renderer_vulkan/pipeline_build_trace.h
     renderer_vulkan/pipeline_helper.h
     renderer_vulkan/pipeline_optimization.h

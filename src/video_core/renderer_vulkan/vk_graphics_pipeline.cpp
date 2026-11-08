@@ -16,6 +16,7 @@
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 
+#include "video_core/renderer_vulkan/gpl_crash_guard.h"
 #include "video_core/renderer_vulkan/pipeline_build_trace.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
@@ -2083,6 +2084,7 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
         flags |= VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT;
     }
     const auto begin = std::chrono::steady_clock::now();
+    const GplCrashGuard::Scope guard{GplCrashGuard::Kind::Pipeline, key.Hash()};
     vk::Pipeline linked_pipeline = device.GetLogical().CreateGraphicsPipeline({
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = &link_ci,
@@ -2109,6 +2111,10 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
 }
 
 bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
+    // The driver crashed on this pipeline's libraries before: build it monolithic.
+    if (GplCrashGuard::IsBlocked(GplCrashGuard::Kind::Pipeline, key.Hash())) {
+        return false;
+    }
     PipelineStates states;
     FillStates(states);
     static constexpr std::array parts{GplPart::PreRasterization, GplPart::Fragment};
@@ -2144,53 +2150,59 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         .pNext = nullptr,
         .flags = VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
     };
-    vertex_input_library = device.GetLogical().CreateGraphicsPipeline({
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &vertex_input_ci,
-        .flags = LibraryFlags(device),
-        .stageCount = 0,
-        .pStages = nullptr,
-        .pVertexInputState = &states.vertex_input_ci,
-        .pInputAssemblyState = &states.input_assembly_ci,
-        .pTessellationState = nullptr,
-        .pViewportState = nullptr,
-        .pRasterizationState = nullptr,
-        .pMultisampleState = nullptr,
-        .pDepthStencilState = nullptr,
-        .pColorBlendState = nullptr,
-        .pDynamicState = &states.dynamic_state_ci,
-        .layout = VK_NULL_HANDLE,
-        .renderPass = VK_NULL_HANDLE,
-        .subpass = 0,
-        .basePipelineHandle = nullptr,
-        .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    {
+        const GplCrashGuard::Scope guard{GplCrashGuard::Kind::Pipeline, key.Hash()};
+        vertex_input_library = device.GetLogical().CreateGraphicsPipeline({
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = &vertex_input_ci,
+            .flags = LibraryFlags(device),
+            .stageCount = 0,
+            .pStages = nullptr,
+            .pVertexInputState = &states.vertex_input_ci,
+            .pInputAssemblyState = &states.input_assembly_ci,
+            .pTessellationState = nullptr,
+            .pViewportState = nullptr,
+            .pRasterizationState = nullptr,
+            .pMultisampleState = nullptr,
+            .pDepthStencilState = nullptr,
+            .pColorBlendState = nullptr,
+            .pDynamicState = &states.dynamic_state_ci,
+            .layout = VK_NULL_HANDLE,
+            .renderPass = VK_NULL_HANDLE,
+            .subpass = 0,
+            .basePipelineHandle = nullptr,
+            .basePipelineIndex = 0,
+        }, *pipeline_cache);
+    }
     const VkGraphicsPipelineLibraryCreateInfoEXT fragment_output_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
         .pNext = nullptr,
         .flags = VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
     };
-    fragment_output_library = device.GetLogical().CreateGraphicsPipeline({
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &fragment_output_ci,
-        .flags = LibraryFlags(device),
-        .stageCount = 0,
-        .pStages = nullptr,
-        .pVertexInputState = nullptr,
-        .pInputAssemblyState = nullptr,
-        .pTessellationState = nullptr,
-        .pViewportState = nullptr,
-        .pRasterizationState = nullptr,
-        .pMultisampleState = &states.multisample_ci,
-        .pDepthStencilState = nullptr,
-        .pColorBlendState = &states.color_blend_ci,
-        .pDynamicState = &states.dynamic_state_ci,
-        .layout = VK_NULL_HANDLE,
-        .renderPass = render_pass,
-        .subpass = 0,
-        .basePipelineHandle = nullptr,
-        .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    {
+        const GplCrashGuard::Scope guard{GplCrashGuard::Kind::Pipeline, key.Hash()};
+        fragment_output_library = device.GetLogical().CreateGraphicsPipeline({
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = &fragment_output_ci,
+            .flags = LibraryFlags(device),
+            .stageCount = 0,
+            .pStages = nullptr,
+            .pVertexInputState = nullptr,
+            .pInputAssemblyState = nullptr,
+            .pTessellationState = nullptr,
+            .pViewportState = nullptr,
+            .pRasterizationState = nullptr,
+            .pMultisampleState = &states.multisample_ci,
+            .pDepthStencilState = nullptr,
+            .pColorBlendState = &states.color_blend_ci,
+            .pDynamicState = &states.dynamic_state_ci,
+            .layout = VK_NULL_HANDLE,
+            .renderPass = render_pass,
+            .subpass = 0,
+            .basePipelineHandle = nullptr,
+            .basePipelineIndex = 0,
+        }, *pipeline_cache);
+    }
     pipeline = LinkLibraries(render_pass, !device.CanFastLinkGraphicsLibraries());
     linked = true;
     return true;
