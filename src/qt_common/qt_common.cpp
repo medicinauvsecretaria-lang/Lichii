@@ -20,6 +20,7 @@
 #include <QGuiApplication>
 #include <QStringLiteral>
 #include "core/frontend/emu_window.h"
+#include "qt_common/windows_scheduling.h"
 #include "qt_common/util/meta.h"
 
 #include <QFile>
@@ -244,6 +245,7 @@ void Init(QWidget* root) {
     // info logging
     LOG_INFO(Frontend, "Lichii Version: {}", yuzu_build_version);
     LogRuntimes();
+    TuneWindowsScheduling();
 #ifdef ARCHITECTURE_x86_64
     const auto& caps = Common::g_cpu_caps;
     std::string cpu_string = caps.cpu_string;

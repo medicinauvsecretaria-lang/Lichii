@@ -287,7 +287,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin ${{ matrix.march }}"
+          # /Zd: line tables only, enough for crash reports to name the function and line.
+          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin /Zd ${{ matrix.march }}"
           if [ -n '${{ matrix.profile }}' ]; then
             flags+=" -fprofile-use=$(cygpath -m "$PWD/${{ matrix.profile }}")"
             flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"
@@ -311,6 +312,7 @@ jobs:
             "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
+            "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG" \
             "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
             "-DCMAKE_C_FLAGS=$flags" \
             "-DCMAKE_CXX_FLAGS=-EHsc $flags"

@@ -12,6 +12,7 @@
 
 #include <fmt/format.h>
 
+#include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "video_core/renderer_vulkan/gpl_crash_guard.h"
@@ -64,7 +65,11 @@ struct State {
         }
 
         // Calls that began in the last session and never ended: the driver crashed in them.
+        // F lines are faults the driver guard caught: the game kept running, so they block their
+        // library or pipeline but are not counted as crashes.
         std::map<std::pair<char, u64>, int> open_calls;
+        std::map<std::pair<char, u64>, bool> caught_faults;
+        bool had_journal = false;
         if (std::ifstream old_journal{journal_path}) {
             char mark{}, kind{};
             std::string hex;
@@ -75,38 +80,62 @@ struct State {
                 } catch (...) {
                     continue; // a line cut short by the crash
                 }
-                // F: a fault the driver guard caught; blocked like an unfinished call.
-                open_calls[{kind, id}] += mark == 'B' ? 1 : (mark == 'F' ? 1000 : -1);
+                had_journal = true;
+                if (mark == 'F') {
+                    caught_faults[{kind, id}] = true;
+                } else {
+                    open_calls[{kind, id}] += mark == 'B' ? 1 : -1;
+                }
             }
         }
-        size_t newly_blocked{};
+        size_t crashed_calls{};
         {
             std::ofstream list{blocklist_path, std::ios::app};
-            for (const auto& [call, count] : open_calls) {
-                if (count <= 0) {
-                    continue;
+            const auto block = [&](char kind_char, u64 id, const char* why) {
+                const Kind kind = static_cast<Kind>(kind_char);
+                if (!blocked.insert(Combine(kind, id)).second) {
+                    return;
                 }
-                const Kind kind = static_cast<Kind>(call.first);
-                if (blocked.insert(Combine(kind, call.second)).second) {
-                    list << call.first << ' ' << fmt::format("{:016x}", call.second) << '\n';
-                    ++newly_blocked;
-                    LOG_WARNING(Render_Vulkan,
-                                "Nx2Perf gpl guard: the driver crashed last session while "
-                                "building {} {:016x}; it is built monolithic from now on",
-                                kind == Kind::Library ? "library" : "pipeline", call.second);
+                list << kind_char << ' ' << fmt::format("{:016x}", id) << '\n';
+                LOG_WARNING(Render_Vulkan,
+                            "Nx2Perf gpl guard: {} {:016x} {} last session; it is built "
+                            "monolithic from now on",
+                            kind == Kind::Library ? "library" : "pipeline", id, why);
+            };
+            for (const auto& [call, count] : open_calls) {
+                if (count > 0) {
+                    ++crashed_calls;
+                    block(call.first, call.second, "crashed the driver");
                 }
             }
+            for (const auto& [call, unused] : caught_faults) {
+                block(call.first, call.second, "faulted in the driver (caught)");
+            }
         }
-        if (newly_blocked != 0) {
+        // Only crashes in consecutive sessions add up: a session that ended without one resets
+        // the count, so occasional crashes spread over days never switch libraries off.
+        const u32 previous = crashes;
+        if (crashed_calls != 0) {
             ++crashes;
+        } else if (had_journal) {
+            crashes = 0;
+        }
+        if (crashes != previous) {
             std::ofstream{state_path} << crashes << '\n';
         }
         serialize = crashes != 0;
         allowed = crashes < MAX_CRASHES;
-        LOG_INFO(Render_Vulkan,
-                 "Nx2Perf gpl guard: {} driver crashes recorded, {} blocked, calls {}{}", crashes,
-                 blocked.size(), serialize ? "one at a time" : "in parallel",
-                 allowed ? "" : "; shader libraries switched off after too many crashes");
+        if (allowed) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf gpl guard: {} crashes in a row, {} blocked, calls {}", crashes,
+                     blocked.size(), serialize ? "one at a time" : "in parallel");
+        } else {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Nx2Perf gpl guard: the driver crashed in {} sessions in a row; shader "
+                         "libraries and the shader warm-up are OFF. One session without a crash "
+                         "turns them back on (or delete {})",
+                         crashes, Common::FS::PathToUTF8String(state_path));
+        }
         journal.open(journal_path, std::ios::trunc);
     }
 

@@ -6,6 +6,8 @@ set(CMAKE_AUTOMOC ON)
 add_library(qt_common STATIC
     qt_common.h
     qt_common.cpp
+    windows_scheduling.cpp
+    windows_scheduling.h
 
     gamemode.cpp
     gamemode.h

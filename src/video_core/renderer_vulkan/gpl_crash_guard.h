@@ -20,7 +20,9 @@ namespace Vulkan::GplCrashGuard {
 /// gpl_guard_blocklist.txt and that library or pipeline is built monolithic from then on, while
 /// every other pipeline keeps using libraries. After a crash the guarded calls are also made one
 /// at a time, in case the driver fails only when several run at once. After
-/// MAX_CRASHES crashes the libraries are switched off entirely, so the game always starts.
+/// MAX_CRASHES crashes in consecutive sessions the libraries are switched off, so the game
+/// always starts; one session without a crash turns them back on. Faults the driver guard
+/// caught (the game kept running) block their library or pipeline without counting as crashes.
 /// Deleting the gpl_guard_* files resets it. EDEN_NX2_GPL_GUARD=0 turns it off.
 
 inline constexpr u32 MAX_CRASHES = 3;
