@@ -80,7 +80,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # rx6600-r5500 fork: only the Windows PGO build, tuned for Zen 3 (Ryzen 5 5500)
+          # rx6600-r5500 fork: only the Windows PGO build, generic x86-64 so it starts on every CPU
           - platform: windows-x86_64-pgo
             runner: windows-2022
             pgo: true
@@ -281,7 +281,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin /clang:-march=znver3 /clang:-mtune=znver3"
+          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin"
           if [ -n '${{ matrix.profile }}' ]; then
             flags+=" -fprofile-use=$(cygpath -m "$PWD/${{ matrix.profile }}")"
             flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"

@@ -35,6 +35,8 @@ struct State {
     std::mutex journal_mutex;
     std::mutex serial_mutex;
     std::atomic<bool> session_disabled{};
+    std::atomic<u32> session_faults{};
+    std::mutex blocked_mutex;
 
     State() {
         const char* const env = std::getenv("EDEN_NX2_GPL_GUARD");
@@ -136,7 +138,11 @@ bool SessionDisabled() {
 
 bool IsBlocked(Kind kind, u64 id) {
     State& state = Get();
-    return state.enabled && state.blocked.contains(Combine(kind, id));
+    if (!state.enabled) {
+        return false;
+    }
+    std::scoped_lock lock{state.blocked_mutex};
+    return state.blocked.contains(Combine(kind, id));
 }
 
 Scope::Scope(Kind kind_, u64 id_) : kind{kind_}, id{id_} {
@@ -158,13 +164,23 @@ Scope::~Scope() {
     }
     State& state = Get();
     if (vk::TakeThreadDriverFault()) {
-        // Caught in the driver: remembered for next sessions, libraries off for this one.
+        // Caught in the driver: this library or pipeline is built monolithic from now on, in
+        // this session too. The others keep using libraries: in a 51 minute session the driver
+        // kept working after a caught fault. Only repeated faults switch libraries off.
         state.Write('F', kind, id);
-        state.session_disabled.store(true, std::memory_order_relaxed);
+        {
+            std::scoped_lock lock{state.blocked_mutex};
+            state.blocked.insert(Combine(kind, id));
+        }
+        const u32 faults = state.session_faults.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (faults >= MAX_CRASHES) {
+            state.session_disabled.store(true, std::memory_order_relaxed);
+        }
         LOG_WARNING(Render_Vulkan,
-                    "Nx2Perf gpl guard: driver fault in {} {:016x}; shader libraries are off "
-                    "until restart and it is built monolithic from now on",
-                    kind == Kind::Library ? "library" : "pipeline", id);
+                    "Nx2Perf gpl guard: driver fault in {} {:016x}; built monolithic from now on "
+                    "({} this session{})",
+                    kind == Kind::Library ? "library" : "pipeline", id, faults,
+                    faults >= MAX_CRASHES ? ", shader libraries off until restart" : "");
     }
     state.Write('E', kind, id);
 }

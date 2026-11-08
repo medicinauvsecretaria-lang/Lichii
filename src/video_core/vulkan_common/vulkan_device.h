@@ -393,7 +393,15 @@ public:
         if (forced == '0' || forced == '1') {
             return forced == '1';
         }
-        return GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY;
+        if (GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY) {
+            return true;
+        }
+        // RDNA2 (Navi 21-24, device IDs 0x73A0-0x743F): optimized links fail with
+        // VK_ERROR_UNKNOWN and then crash amdvlk64.dll (RX 6600, driver 32.0.21045.16010), so fast
+        // links are the lesser evil there. RDNA3 and newer keep optimized links: fast links draw
+        // white rings around alpha-blended effects on them (RX 7700 XT, RX 7800 XT).
+        const u32 id = GetDeviceID();
+        return id >= 0x73A0 && id <= 0x743F;
     }
 
     /// Returns true for tile-based deferred renderers.
