@@ -14,6 +14,35 @@ EDEN_NX2_SPLIT=2
 # Batch GPU fence syncpoints to reduce host driver overhead and smooth frametimes.
 EDEN_NX2_FENCE_BATCH=1
 
+# --- r6: Ocarina of Time on a 6-core CPU (Ryzen 5 5500 + RX 6600) ---
+# A trace in Hyrule Castle Town: the six guest cores ran 50-62% of the time, sleeping and waking
+# ~600 times a second each and spending ~20% in Windows waits. These cut that overhead.
+# Idle guest cores spin with PAUSE instead of yielding the SMT sibling (zortos293/Lichii#641).
+EDEN_NX2_IDLE_PAUSE=1
+# Scheduler interrupt path with a spin lock + atomic wait instead of mutex + condition variable.
+EDEN_NX2_CORE_LOCK=1
+# Current guest thread read from plain thread_locals.
+EDEN_NX2_FAST_TLS=1
+# Short spin before an address-arbiter wait sleeps.
+EDEN_NX2_ARB_SPIN=8
+# Ocarina's two main threads may run on any guest core instead of waiting for theirs.
+EDEN_NX2_OOT_WIDE_AFFINITY=1
+# Ocarina's frame-end poll sleeps 250 us instead of 1 ms.
+EDEN_NX2_EXP24=3
+# Ocarina's resource thread backs off instead of rescanning at once (built-in patch + its sleep).
+EDEN_NX2_OOT_POLL_BACKOFF=1
+EDEN_NX2_EXP25=1
+# cLohan's Occlusion Off: no per-object occlusion queries, so no conditional-render readbacks.
+EDEN_NX2_OCCLUSION_OFF=1
+# Native uniform banks: compare only pages that may have changed (=1 keeps a once-a-frame check;
+# zortos293/Lichii#909 found no write behind the tracker in Ocarina).
+EDEN_NX2_EXP9=3
+# Already on by default in r6, each with its own off switch:
+#   EDEN_NX2_OOT_HOST_ZSTD=0       game's own zstd decoder instead of the host's
+#   EDEN_NX2_OOT_FAST_LOOKUP_OFF=1 game's byte-by-byte strcmp in its index lookup
+#   EDEN_NX2_INLINE_CNTPCT=0       counter reads through the host call
+# To try: EDEN_NX2_PIN_THREADS=0 (the GPU threads stop reserving two whole cores).
+
 # Leave buffer downloads disabled on Switch 2 (default): forcing downloads (=1) copies back
 # 90-220 MB/s of buffers CPU never touches, causing heavy mutex contention and dropping FPS by ~38-63%.
 #EDEN_NX2_BUFFER_DOWNLOADS=1
