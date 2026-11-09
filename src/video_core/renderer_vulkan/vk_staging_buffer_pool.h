@@ -61,6 +61,8 @@ private:
         u64 index;
         u64 tick = 0;
         bool deferred{};
+        /// Bytes the buffer holds: 1 << log2_level, or the request itself past 64 MiB.
+        VkDeviceSize size{};
 
         StagingBufferRef Ref() const noexcept {
             return {

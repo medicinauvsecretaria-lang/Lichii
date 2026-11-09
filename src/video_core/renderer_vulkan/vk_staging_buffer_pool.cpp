@@ -64,6 +64,18 @@ size_t GetStreamBufferSize(const Device& device) {
                 return Common::AlignUp(heap_size * 3 / 4, MAX_ALIGNMENT);
             }
         }
+        // A discrete card without Resizable BAR has a 256 MiB device-local host-visible heap
+        // (RX 6600: 231 MiB budget). AMD's driver puts its descriptor pools and command memory
+        // there, and a 128 MiB stream buffer left it ~100 MiB: entering Ocarina of Time's Hyrule
+        // Castle Town the heap reached 231 of 231 MiB, and vkCreateDescriptorPool aborted the
+        // process inside amdvlk64.dll (every crash dump, r3 to r5.1). Take a quarter of the heap.
+        VkDeviceSize bar_size = 0;
+        ForEachDeviceLocalHostVisibleHeap(device, [&bar_size](size_t, VkMemoryHeap& heap) {
+            bar_size = (std::max)(bar_size, heap.size);
+        });
+        if (!device.IsIntegrated() && bar_size != 0 && bar_size <= 2 * MAX_STREAM_BUFFER_SIZE) {
+            return Common::AlignUp(bar_size / 4, MAX_ALIGNMENT);
+        }
         return MAX_STREAM_BUFFER_SIZE;
     }
 
@@ -145,7 +157,25 @@ void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
 void StagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
 
-    ReleaseCache(MemoryUsage::DeviceLocal);
+    // Device local staging buffers (ASTC to BC3 outputs, compute scratch) are freed every frame
+    // past two idle ones per size. The sweep below visits one size class every 64 frames and frees
+    // at most 16 buffers there, so the thousands a burst of new textures created (Ocarina of
+    // Time's Hyrule Castle Town: ~2500 textures in a few seconds) held gigabytes of VRAM for
+    // minutes, until the AMD driver ran out of device memory and aborted.
+    for (StagingBuffers& level : device_local_cache) {
+        auto& entries = level.entries;
+        if (entries.size() <= 2) {
+            continue;
+        }
+        size_t idle = 0;
+        std::erase_if(entries, [this, &idle](const StagingBuffer& entry) {
+            return !entry.deferred && scheduler.IsFree(entry.tick) && ++idle > 2;
+        });
+        level.delete_index = 0;
+        if (level.iterate_index > entries.size()) {
+            level.iterate_index = 0;
+        }
+    }
     ReleaseCache(MemoryUsage::Upload);
     ReleaseCache(MemoryUsage::Download);
 }
@@ -206,8 +236,8 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
                                                                         bool deferred) {
     StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
 
-    const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+    const auto is_free = [this, size](const StagingBuffer& entry) {
+        return !entry.deferred && entry.size >= size && scheduler.IsFree(entry.tick);
     };
     auto& entries = cache_level.entries;
     const auto hint_it = entries.begin() + cache_level.iterate_index;
@@ -231,7 +261,11 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = 1ULL << log2_size,
+        // Past 64 MiB the request's own size, not the next power of two: a 1.1 GiB texture upload
+        // (Ocarina of Time's Hyrule Castle Town) asked for 2 GiB, the driver's largest
+        // allocation, and anything larger failed and ended the session.
+        .size = size > (VkDeviceSize{64} << 20) ? Common::AlignUp(VkDeviceSize{size}, 64_KiB)
+                                                : 1ULL << log2_size,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -287,6 +321,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .index = unique_ids++,
         .tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick(),
         .deferred = deferred,
+        .size = buffer_ci.size,
     });
     return entry.Ref();
 }
