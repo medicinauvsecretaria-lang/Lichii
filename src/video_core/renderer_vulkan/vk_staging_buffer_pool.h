@@ -61,6 +61,8 @@ private:
         u64 index;
         u64 tick = 0;
         bool deferred{};
+        /// Bytes the buffer holds: 1 << log2_level, or the request itself past 64 MiB.
+        VkDeviceSize size{};
 
         StagingBufferRef Ref() const noexcept {
             return {
@@ -100,6 +102,9 @@ private:
     void ReleaseCache(MemoryUsage usage);
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
+
+    /// Frees every idle staging buffer of every size, for an allocation that did not fit.
+    void ReleaseAllIdle();
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
     }

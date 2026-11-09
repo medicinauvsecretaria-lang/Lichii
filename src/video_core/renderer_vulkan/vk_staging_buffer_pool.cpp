@@ -233,8 +233,8 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
                                                                         bool deferred) {
     StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
 
-    const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+    const auto is_free = [this, size](const StagingBuffer& entry) {
+        return !entry.deferred && entry.size >= size && scheduler.IsFree(entry.tick);
     };
     auto& entries = cache_level.entries;
     const auto hint_it = entries.begin() + cache_level.iterate_index;
@@ -258,7 +258,11 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = 1ULL << log2_size,
+        // Past 64 MiB the request's own size, not the next power of two: a 1.1 GiB texture upload
+        // (Ocarina of Time's Hyrule Castle Town) asked for 2 GiB, the driver's largest
+        // allocation, and anything larger failed and ended the session.
+        .size = size > (VkDeviceSize{64} << 20) ? Common::AlignUp(VkDeviceSize{size}, 64_KiB)
+                                                : 1ULL << log2_size,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -273,7 +277,21 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
+    vk::Buffer buffer;
+    try {
+        buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
+    } catch (const vk::Exception& exception) {
+        if (exception.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY &&
+            exception.GetResult() != VK_ERROR_OUT_OF_HOST_MEMORY) {
+            throw;
+        }
+        // Idle staging buffers of other sizes hold memory this one may fit in once freed.
+        LOG_WARNING(Render_Vulkan,
+                    "Staging buffer of {} MiB did not fit; freeing idle staging buffers and retrying",
+                    buffer_ci.size >> 20);
+        ReleaseAllIdle();
+        buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
+    }
     if (device.HasDebuggingToolAttached()) {
         ++buffer_index;
         buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());
@@ -292,6 +310,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .index = unique_ids++,
         .tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick(),
         .deferred = deferred,
+        .size = buffer_ci.size,
     });
     return entry.Ref();
 }
@@ -307,6 +326,18 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
     default:
         ASSERT_MSG(false, "Invalid memory usage={}", usage);
         return upload_cache;
+    }
+}
+
+void StagingBufferPool::ReleaseAllIdle() {
+    for (StagingBuffersCache* cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (StagingBuffers& level : *cache) {
+            std::erase_if(level.entries, [this](const StagingBuffer& entry) {
+                return !entry.deferred && scheduler.IsFree(entry.tick);
+            });
+            level.delete_index = 0;
+            level.iterate_index = 0;
+        }
     }
 }
 
