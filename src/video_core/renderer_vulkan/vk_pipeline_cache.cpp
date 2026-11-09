@@ -589,6 +589,21 @@ bool DriverCachesPipelines(const Device& device) {
         return false;
     }
 }
+
+// EDEN_NX2_AMD_APP_PIPELINE_CACHE (default 1): the AMD proprietary driver's own cache did not
+// make boot builds fast (every launch compiled all pipelines in full), so the application's
+// VkPipelineCache is kept there. Saves are then limited to the boot prebuild, its end and the
+// exit: a save during play copies the whole blob and holds the driver's cache lock.
+bool AmdAppPipelineCache(const Device& device) {
+    if (device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY) {
+        return false;
+    }
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_AMD_APP_PIPELINE_CACHE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
 } // Anonymous namespace
 
 PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
@@ -605,7 +620,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       texture_cache{texture_cache_}, shader_notify{shader_notify_},
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
-                                !DriverCachesPipelines(device_)},
+                                (!DriverCachesPipelines(device_) || AmdAppPipelineCache(device_))},
       oot_visual_workaround{[] {
           const char* value = std::getenv("EDEN_NX2_OOT_VISUAL_WORKAROUND");
           return value != nullptr && std::string_view{value} == "1";
@@ -2893,7 +2908,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 }
                 // These builds fill the driver cache too, but only GPU thread builds queued its
                 // writes: a session stopped before its exit save kept none of them.
-                if (build && VulkanPipelineCacheSaveDue(background_last_save)) {
+                if (build && !AmdAppPipelineCache(device) &&
+                    VulkanPipelineCacheSaveDue(background_last_save)) {
                     QueueVulkanPipelineCacheSave(false);
                 }
                 if (background_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -4950,6 +4966,9 @@ vk::PipelineCache& PipelineCache::WarmPipelineCache() {
 void PipelineCache::QueueVulkanPipelineCacheFlush() {
     if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
         return;
+    }
+    if (AmdAppPipelineCache(device)) {
+        return; // saved at boot and at exit only
     }
     if (++pipelines_since_flush < VULKAN_CACHE_FLUSH_PIPELINES) {
         return;

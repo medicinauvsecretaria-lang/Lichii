@@ -143,6 +143,21 @@ public:
         return memory_allocator.FailedImages();
     }
 
+    /// True once if an allocation went over the budget or failed since the last call.
+    bool TakeAllocationFailure() const noexcept {
+        return memory_allocator.TakeAllocationFailure();
+    }
+
+    /// The driver's use of the main device-local heap (everything, without the VRAM reserve) and
+    /// its budget; false when unknown.
+    bool GetMainHeapUsage(u64& usage, u64& budget) const {
+        return device.GetMainHeapUsage(usage, budget);
+    }
+
+    /// Device memory emergency: empties the image pool, frees idle staging buffers and releases
+    /// the VRAM reserve.
+    void EmergencyPurge();
+
     /// EDEN_NX2_EXP42 (fable_answer_12 2B): VkImages of deleted render targets, kept once the
     /// GPU is done with them for the next image made with the same create info. A null image
     /// when none is pooled (or the switch is off).

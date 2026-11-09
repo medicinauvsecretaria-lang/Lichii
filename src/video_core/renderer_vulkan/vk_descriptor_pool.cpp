@@ -81,6 +81,9 @@ static void AllocatePool(const Device& device, DescriptorBank& bank) {
     add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.images);
     add(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, info.sampled_images);
     add(VK_DESCRIPTOR_TYPE_SAMPLER, info.samplers);
+    // AMD's driver aborts the process when it cannot get memory for the pool: with the device
+    // heap near its budget, give back the VRAM reserve first.
+    device.ReleaseVramReserveIfNearBudget(u64{512} << 20);
     VideoCommon::Churn::Add(VideoCommon::Churn::DescriptorPools);
     bank.pools.push_back(device.GetLogical().CreateDescriptorPool({
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,

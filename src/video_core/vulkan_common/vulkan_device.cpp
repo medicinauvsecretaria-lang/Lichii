@@ -871,6 +871,8 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     vk::Check(vmaCreateAllocator(&allocator_info, &allocator));
 
+    InitVramReserve();
+
     owns_static_pipeline_cache = surface != VkSurfaceKHR{};
     LoadStaticPipelineCache();
 
@@ -886,6 +888,7 @@ Device::~Device() {
 #endif
     SaveStaticPipelineCache();
     ShutdownGPULogging();
+    vram_reserve.reset();
     for (auto& pools : separate_pools) {
         for (VmaPool pool : pools) {
             if (pool != VK_NULL_HANDLE) {
@@ -1997,7 +2000,179 @@ u64 Device::QueryDeviceMemoryUsage() const {
     for (const size_t heap : valid_heap_memory) {
         result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
     }
+    // A released VRAM reserve still counts as used, so the caches keep that room for the driver.
+    result += vram_reserve_missing.load(std::memory_order_relaxed);
     return result;
+}
+
+void Device::InitVramReserve() {
+    const VkPhysicalDeviceMemoryProperties props = physical.GetMemoryProperties().memoryProperties;
+    if (main_heap >= props.memoryHeapCount) {
+        return;
+    }
+    u64 heap_size = props.memoryHeaps[main_heap].size;
+    if (heap_size_limit != 0) {
+        heap_size = (std::min)(heap_size, heap_size_limit);
+    }
+    u64 mib = (!is_integrated && extensions.memory_budget && heap_size <= (u64{8704} << 20)) ? 256 : 0;
+    if (const char* value = std::getenv("EDEN_NX2_VRAM_RESERVE_MIB")) {
+        char* end{};
+        const u64 parsed = std::strtoull(value, &end, 10);
+        if (end != value) {
+            mib = parsed;
+        }
+    }
+    mib = (std::min)(mib, u64{2048});
+    if (mib == 0) {
+        return;
+    }
+    // A device-local type of the main heap, preferably not the host-visible one.
+    u32 type = ~0u;
+    for (u32 i = 0; i < props.memoryTypeCount; ++i) {
+        const VkMemoryPropertyFlags flags = props.memoryTypes[i].propertyFlags;
+        if (props.memoryTypes[i].heapIndex != main_heap ||
+            (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) {
+            continue;
+        }
+        if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+            type = i;
+            break;
+        }
+        if (type == ~0u) {
+            type = i;
+        }
+    }
+    if (type == ~0u) {
+        return;
+    }
+    vram_reserve_target = mib << 20;
+    vram_reserve_type = type;
+    std::scoped_lock lk{vram_reserve_mutex};
+    if (TryAcquireVramReserve()) {
+        LOG_INFO(Render_Vulkan, "VRAM reserve: holding {} MiB of device memory for the driver",
+                 mib);
+    } else {
+        vram_reserve_missing.store(vram_reserve_target, std::memory_order_relaxed);
+        LOG_WARNING(Render_Vulkan, "VRAM reserve: could not allocate {} MiB", mib);
+    }
+}
+
+bool Device::TryAcquireVramReserve() const {
+    if (vram_reserve_target == 0 || vram_reserve) {
+        return false;
+    }
+    const VkMemoryAllocateInfo allocate_info{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .allocationSize = vram_reserve_target,
+        .memoryTypeIndex = vram_reserve_type,
+    };
+    vram_reserve = logical.TryAllocateMemory(allocate_info);
+    if (!vram_reserve) {
+        return false;
+    }
+    vram_reserve_bytes.store(vram_reserve_target, std::memory_order_release);
+    vram_reserve_missing.store(0, std::memory_order_relaxed);
+    return true;
+}
+
+bool Device::ReleaseVramReserve(const char* reason) const {
+    if (vram_reserve_bytes.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
+    u64 bytes{};
+    {
+        std::scoped_lock lk{vram_reserve_mutex};
+        bytes = vram_reserve_bytes.load(std::memory_order_relaxed);
+        if (bytes == 0) {
+            return false;
+        }
+        vram_reserve.reset();
+        vram_reserve_bytes.store(0, std::memory_order_release);
+        vram_reserve_missing.store(vram_reserve_target, std::memory_order_relaxed);
+        vram_reserve_quiet_frames.store(0, std::memory_order_relaxed);
+    }
+    LOG_WARNING(Render_Vulkan, "VRAM reserve of {} MiB released: {}", bytes >> 20, reason);
+    return true;
+}
+
+void Device::NoteVramPressure() const {
+    if (vram_reserve_target == 0) {
+        return;
+    }
+    vram_reserve_quiet_frames.store(0, std::memory_order_relaxed);
+    ReleaseVramReserve("an allocation went over the device memory budget");
+}
+
+bool Device::GetMainHeapUsage(u64& usage, u64& budget, bool include_reserve) const {
+    if (!extensions.memory_budget) {
+        return false;
+    }
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT heap_budget{};
+    heap_budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    physical.GetMemoryProperties(&heap_budget);
+    u64 heap_limit = heap_budget.heapBudget[main_heap];
+    if (heap_size_limit != 0) {
+        heap_limit = (std::min)(heap_limit, heap_size_limit);
+    }
+    u64 heap_usage = heap_budget.heapUsage[main_heap];
+    if (!include_reserve) {
+        const u64 held = vram_reserve_bytes.load(std::memory_order_acquire);
+        heap_usage -= (std::min)(heap_usage, held);
+    }
+    budget = heap_limit;
+    usage = heap_usage;
+    return heap_limit != 0;
+}
+
+void Device::ReleaseVramReserveIfNearBudget(u64 margin) const {
+    if (vram_reserve_bytes.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    u64 usage{};
+    u64 budget{};
+    if (GetMainHeapUsage(usage, budget, true) && usage + margin >= budget) {
+        ReleaseVramReserve("a descriptor pool is about to be created with little memory left");
+    }
+}
+
+void Device::TickVramReserve() const {
+    if (vram_reserve_target == 0) {
+        return;
+    }
+    constexpr u32 CheckEvery = 8;
+    constexpr u32 ReacquireFrames = 1800;
+    const u32 frame = vram_reserve_frames.fetch_add(1, std::memory_order_relaxed);
+    if (frame % CheckEvery != 0) {
+        return;
+    }
+    u64 usage{};
+    u64 budget{};
+    if (!GetMainHeapUsage(usage, budget, true)) {
+        return;
+    }
+    const bool held = vram_reserve_bytes.load(std::memory_order_acquire) != 0;
+    constexpr u64 ReleaseMargin = u64{128} << 20;
+    if (usage + ReleaseMargin >= budget) {
+        vram_reserve_quiet_frames.store(0, std::memory_order_relaxed);
+        if (held) {
+            ReleaseVramReserve("the device-local heap is within 128 MiB of its budget");
+        }
+        return;
+    }
+    if (held) {
+        return;
+    }
+    const u32 quiet = vram_reserve_quiet_frames.fetch_add(CheckEvery, std::memory_order_relaxed) +
+                      CheckEvery;
+    if (quiet < ReacquireFrames || budget - usage < vram_reserve_target + (u64{512} << 20)) {
+        return;
+    }
+    std::scoped_lock lk{vram_reserve_mutex};
+    if (TryAcquireVramReserve()) {
+        LOG_INFO(Render_Vulkan, "VRAM reserve of {} MiB taken again after {} quiet frames",
+                 vram_reserve_target >> 20, quiet);
+    }
 }
 
 u64 Device::GetDeviceMemorySlack() const {

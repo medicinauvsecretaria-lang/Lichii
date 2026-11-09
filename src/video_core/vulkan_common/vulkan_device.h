@@ -1118,6 +1118,28 @@ FN_MAX_LIMIT_LIST
     /// yet the driver does: with the heap at its budget it is not available to new images.
     u64 GetDeviceMemorySlack() const;
 
+    /// VRAM reserve (EDEN_NX2_VRAM_RESERVE_MIB, 256 MiB by default on heaps up to 8.5 GiB, 0
+    /// off): device-local memory nothing uses, held so the driver has room for its own
+    /// allocations (descriptor pools, pipelines). AMD's driver aborts the process when it cannot
+    /// get that. Released when memory runs short, taken again after a long quiet spell.
+    /// Releases it; true when it was held. Thread safe.
+    bool ReleaseVramReserve(const char* reason) const;
+
+    /// An allocation went over the budget or failed: releases the reserve and restarts the quiet
+    /// spell. Thread safe, cheap when there is no reserve.
+    void NoteVramPressure() const;
+
+    /// Releases the reserve when the main heap is within `margin` bytes of its budget.
+    void ReleaseVramReserveIfNearBudget(u64 margin) const;
+
+    /// Once a frame: releases the reserve when the heap fills, takes it again after a quiet spell.
+    void TickVramReserve() const;
+
+    /// The driver's use of the main device-local heap and its budget, everything counted (driver
+    /// internals, allocator blocks, pooled images). The reserve is left out unless
+    /// include_reserve. False without VK_EXT_memory_budget.
+    bool GetMainHeapUsage(u64& usage, u64& budget, bool include_reserve = false) const;
+
     u32 GetSetsPerPool() const {
         return sets_per_pool;
     }
@@ -1437,6 +1459,19 @@ private:
 
     /// Nsight Aftermath GPU crash tracker
     std::unique_ptr<NsightAftermathTracker> nsight_aftermath_tracker;
+
+    void InitVramReserve();
+    /// Allocates the reserve; the caller holds vram_reserve_mutex.
+    bool TryAcquireVramReserve() const;
+
+    u64 vram_reserve_target{};  ///< Reserve size in bytes, 0 when off.
+    u32 vram_reserve_type{};    ///< Memory type it is allocated from.
+    mutable std::mutex vram_reserve_mutex;
+    mutable std::atomic<u64> vram_reserve_bytes{};   ///< Size held now, 0 when released.
+    mutable std::atomic<u64> vram_reserve_missing{}; ///< Size released, counted as used meanwhile.
+    mutable std::atomic<u32> vram_reserve_quiet_frames{};
+    mutable std::atomic<u32> vram_reserve_frames{};
+    mutable vk::DeviceMemory vram_reserve; ///< Last member: freed before the logical device.
 };
 
 } // namespace Vulkan

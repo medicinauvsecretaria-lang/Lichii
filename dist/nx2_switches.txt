@@ -43,6 +43,16 @@ EDEN_NX2_EXP9=3
 #   EDEN_NX2_INLINE_CNTPCT=0       counter reads through the host call
 # To try: EDEN_NX2_PIN_THREADS=0 (the GPU threads stop reserving two whole cores).
 
+# --- r6.1 ---
+# Ocarina's name lookup (its hottest guest function in Castle Town) steps on the host; the
+# game's code still runs the last steps of each search. EDEN_NX2_EXP50=1 turns it off live.
+EDEN_NX2_OOT_NATIVE_LOOKUP=1
+# On by default, each with its own off switch:
+#   EDEN_NX2_AMD_APP_PIPELINE_CACHE=0  AMD: no vulkan_pipelines file (every boot builds all)
+#   EDEN_NX2_VRAM_GUARD=0              no emergency purge when real VRAM use nears the budget
+#   EDEN_NX2_VRAM_RESERVE_MIB=0        no VRAM kept back for the driver (descriptor pools)
+#   EDEN_NX2_VMA_DUMP=0                no VRAM allocation map in the log folder near the budget
+
 # Leave buffer downloads disabled on Switch 2 (default): forcing downloads (=1) copies back
 # 90-220 MB/s of buffers CPU never touches, causing heavy mutex contention and dropping FPS by ~38-63%.
 #EDEN_NX2_BUFFER_DOWNLOADS=1

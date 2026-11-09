@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 #include <limits>
 #include <optional>
 #include <type_traits>
@@ -16,6 +20,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "common/fs/path_util.h"
 #include "common/literals.h"
 #include "common/logging.h"
 #include <ranges>
@@ -260,6 +265,9 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
                         ci.arrayLayers, static_cast<u32>(ci.format));
         }
         pressure_events.fetch_add(1, std::memory_order_relaxed);
+        allocation_failed.store(true, std::memory_order_relaxed);
+        // Give the driver room for its own allocations (descriptor pools) before going on.
+        device.NoteVramPressure();
         VmaAllocationCreateInfo relaxed = alloc_ci;
         relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
@@ -283,6 +291,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         pressure_events.fetch_add(1, std::memory_order_relaxed);
+        allocation_failed.store(true, std::memory_order_relaxed);
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && ci.imageType != VK_IMAGE_TYPE_1D &&
         UsesUnbackedFallback(texels, may_fail)) {
@@ -302,6 +311,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     }
     if (result != VK_SUCCESS) {
         failed_images.fetch_add(1, std::memory_order_relaxed);
+        allocation_failed.store(true, std::memory_order_relaxed);
         static u32 failed_logged{};
         if (failed_logged++ < 32) {
             LOG_ERROR(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}",
@@ -465,6 +475,8 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
             // exception this threw ended the session. Like images, go over the budget first and
             // let the driver page, then fall back to host memory, which is slower but valid.
             pressure_events.fetch_add(1, std::memory_order_relaxed);
+            allocation_failed.store(true, std::memory_order_relaxed);
+            device.NoteVramPressure();
             VmaAllocationCreateInfo relaxed = alloc_ci;
             relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
             result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
@@ -670,6 +682,57 @@ void LogMemoryStatistics(const Device& device) {
         LOG_INFO(Render_Vulkan, "VMA heap {}: usage {} MiB of budget {} MiB, VMA blocks {} MiB",
                  heap, budgets[heap].usage >> 20, budgets[heap].budget >> 20,
                  budgets[heap].statistics.blockBytes >> 20);
+    }
+}
+
+void MaybeWriteVmaDump(const Device& device) {
+    // A device heap past 85% of its budget: write every allocation (kind, size, usage flags) to
+    // the log folder, at most three times a session, to tell what fills VRAM when it is not
+    // textures (Ocarina of Time's Hyrule Castle Town on an 8 GB card: 5.7 GB in use, 1.9 GB of
+    // it images). EDEN_NX2_VMA_DUMP=0 turns it off.
+    static const bool dump_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_VMA_DUMP");
+        return value == nullptr || value[0] != '0';
+    }();
+    static u32 dumps{};
+    static auto last_dump = std::chrono::steady_clock::time_point{};
+    if (!dump_enabled || dumps >= 3) {
+        return;
+    }
+    const VmaAllocator allocator = device.GetAllocator();
+    if (allocator == nullptr) {
+        return;
+    }
+    const VkPhysicalDeviceMemoryProperties* properties{};
+    vmaGetMemoryProperties(allocator, &properties);
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(allocator, budgets.data());
+    for (u32 heap = 0; heap < properties->memoryHeapCount; ++heap) {
+        const bool device_heap =
+            (properties->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        const VmaBudget& b = budgets[heap];
+        if (!device_heap || b.budget == 0 || b.usage * 100 < b.budget * 85 ||
+            properties->memoryHeaps[heap].size < (u64{1} << 30)) {
+            continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (dumps != 0 && now - last_dump < std::chrono::seconds{60}) {
+            break;
+        }
+        last_dump = now;
+        ++dumps;
+        char* json = nullptr;
+        vmaBuildStatsString(allocator, &json, VK_TRUE);
+        const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+                          ("vma_dump_" + std::to_string(dumps) + ".json");
+        if (json != nullptr) {
+            std::ofstream{path, std::ios::binary | std::ios::trunc} << json;
+            vmaFreeStatsString(allocator, json);
+        }
+        LOG_WARNING(Render_Vulkan,
+                    "VMA heap {} at {} of {} MiB: allocation map written to vma_dump_{}.json",
+                    heap, b.usage >> 20, b.budget >> 20, dumps);
+        break;
     }
 }
 

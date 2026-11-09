@@ -46,6 +46,10 @@ public:
 
     void TickFrame();
 
+    /// Frees every staging buffer the GPU is done with (device memory emergencies). Returns how
+    /// many. Call from the thread that requests staging buffers.
+    size_t FreeIdle();
+
 private:
     struct StreamBufferCommit {
         size_t upper_bound;

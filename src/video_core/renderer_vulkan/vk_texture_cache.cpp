@@ -2995,8 +2995,18 @@ void TextureCacheRuntime::TrimImagePool(u64 max_bytes) {
     }
 }
 
+void TextureCacheRuntime::EmergencyPurge() {
+    TrimImagePool(0);
+    staging_buffer_pool.FreeIdle();
+    device.ReleaseVramReserve("device memory emergency");
+}
+
 void TextureCacheRuntime::TickFrame() {
     ++image_pool_frame;
+    device.TickVramReserve();
+    if (image_pool_frame % 16 == 0) {
+        Vulkan::MaybeWriteVmaDump(device);
+    }
     {
         // EXP42's pool: images older than ImagePoolMaxFrames go, and all of them when the
         // switch is off or device memory ran short (an image did not fit or could not be made).

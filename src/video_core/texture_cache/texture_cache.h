@@ -566,6 +566,70 @@ void TextureCache<P>::TickFrame() {
             total_used_memory -= (std::min)(total_used_memory, runtime.PooledImageBytes());
         }
     }
+    // EDEN_NX2_VRAM_GUARD (default on): emergency purge from the driver's real heap usage, which
+    // unlike total_used_memory counts the images waiting to be freed and the image pool, and is
+    // not tied to the thresholds (EDEN_NX2_TC_*_MIB overrides do not turn it off). Near the budget
+    // (EDEN_NX2_VRAM_EMERGENCY_MIB left, 384 by default) or after an allocation that did not
+    // fit: empty the image pool, free idle staging buffers, give back the VRAM reserve, collect
+    // as when out of memory and keep more room free. AMD's driver aborts the process when it
+    // cannot get memory for its own objects.
+    bool vram_emergency = false;
+    if constexpr (requires(u64& usage, u64& budget) {
+                      runtime.TakeAllocationFailure();
+                      runtime.GetMainHeapUsage(usage, budget);
+                      runtime.EmergencyPurge();
+                  }) {
+        static const bool guard_enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_VRAM_GUARD");
+            return value == nullptr || value[0] != '0';
+        }();
+        static const u64 emergency_margin = [] {
+            u64 mib = 384;
+            if (const char* value = std::getenv("EDEN_NX2_VRAM_EMERGENCY_MIB")) {
+                char* end{};
+                const u64 parsed = std::strtoull(value, &end, 10);
+                if (end != value) {
+                    mib = parsed;
+                }
+            }
+            return mib << 20;
+        }();
+        if (guard_enabled) {
+            const bool alloc_failed = runtime.TakeAllocationFailure();
+            u64 heap_usage{};
+            u64 heap_budget{};
+            bool near_budget = false;
+            if (alloc_failed || (frame_tick & 3) == 0) {
+                near_budget = runtime.GetMainHeapUsage(heap_usage, heap_budget) &&
+                              heap_budget > emergency_margin &&
+                              heap_usage >= heap_budget - emergency_margin;
+            }
+            if (alloc_failed || near_budget) {
+                vram_emergency = true;
+                runtime.EmergencyPurge();
+                static bool emergency_seen = false;
+                static u64 last_raise_frame = 0;
+                static u64 last_log_frame = 0;
+                if (!emergency_seen || frame_tick - last_raise_frame >= 60) {
+                    last_raise_frame = frame_tick;
+                    pressure_margin = (std::min)(pressure_margin + 256_MiB, 3_GiB);
+                    pressure_quiet_frames = 0;
+                    budget_check_frames = 0; // thresholds are recomputed next frame
+                }
+                if (!emergency_seen || frame_tick - last_log_frame >= 300) {
+                    last_log_frame = frame_tick;
+                    LOG_WARNING(HW_GPU,
+                                "VRAM emergency: driver heap {} of {} MiB (limit {} MiB left), "
+                                "allocation failed: {}, texture cache counts {} MiB; image pool "
+                                "and idle staging buffers freed, collecting, keeping {} MiB more "
+                                "free",
+                                heap_usage >> 20, heap_budget >> 20, emergency_margin >> 20,
+                                alloc_failed, total_used_memory >> 20, pressure_margin >> 20);
+                }
+                emergency_seen = true;
+            }
+        }
+    }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
     static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
@@ -648,8 +712,8 @@ void TextureCache<P>::TickFrame() {
         out_of_memory = failed != seen_failed_images;
         seen_failed_images = failed;
     }
-    if (out_of_memory || total_used_memory > minimum_memory) {
-        RunGarbageCollector(out_of_memory);
+    if (out_of_memory || vram_emergency || total_used_memory > minimum_memory) {
+        RunGarbageCollector(out_of_memory || vram_emergency);
     }
     if (out_of_memory) {
         // Textures left out for lack of memory are made again on their next read, once a frame

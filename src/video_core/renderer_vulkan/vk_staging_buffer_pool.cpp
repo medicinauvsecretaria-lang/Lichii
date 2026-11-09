@@ -180,6 +180,22 @@ void StagingBufferPool::TickFrame() {
     ReleaseCache(MemoryUsage::Download);
 }
 
+size_t StagingBufferPool::FreeIdle() {
+    size_t freed = 0;
+    for (StagingBuffersCache* cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (StagingBuffers& level : *cache) {
+            const size_t before = level.entries.size();
+            std::erase_if(level.entries, [this](const StagingBuffer& entry) {
+                return !entry.deferred && scheduler.IsFree(entry.tick);
+            });
+            freed += before - level.entries.size();
+            level.iterate_index = 0;
+            level.delete_index = 0;
+        }
+    }
+    return freed;
+}
+
 StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
     if (AreRegionsActive(Region(free_iterator) + 1,
                          (std::min)(Region(iterator + size) + 1, NUM_SYNCS))) {

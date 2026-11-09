@@ -142,6 +142,12 @@ namespace Vulkan {
             return failed_images.load(std::memory_order_relaxed);
         }
 
+        /// True once if an image or device-local buffer did not fit the budget or could not be
+        /// made since the last call (the texture cache's emergency purge reads it).
+        bool TakeAllocationFailure() const noexcept {
+            return allocation_failed.exchange(false, std::memory_order_acq_rel);
+        }
+
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const;
 
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
@@ -184,6 +190,7 @@ namespace Vulkan {
         u32 valid_memory_types{~0u};
         mutable std::atomic<u32> pressure_events{0};
         mutable std::atomic<u32> failed_images{0};
+        mutable std::atomic<bool> allocation_failed{false};
         mutable std::mutex buffer_type_mutex;
         /// Memory type of device-local buffers by usage and flags (CreateBufferInSeparatePool).
         mutable std::unordered_map<u64, u32> buffer_memory_types;
@@ -191,5 +198,10 @@ namespace Vulkan {
 
     /// Logs VMA's blocks and allocations per memory type, and each heap's budget.
     void LogMemoryStatistics(const Device& device);
+
+    /// Writes VMA's allocation map (vma_dump_N.json in the log folder) when a device heap passes
+    /// 85% of its budget: at most three a session, 60 s apart, EDEN_NX2_VMA_DUMP=0 turns it off.
+    /// Call from one thread, now and then.
+    void MaybeWriteVmaDump(const Device& device);
 
 } // namespace Vulkan
