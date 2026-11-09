@@ -9,6 +9,8 @@ add_library(qt_common STATIC
 
     gamemode.cpp
     gamemode.h
+    windows_scheduling.cpp
+    windows_scheduling.h
 
     config/uisettings.cpp
     config/uisettings.h

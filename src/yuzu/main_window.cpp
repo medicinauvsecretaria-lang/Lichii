@@ -8,6 +8,7 @@
 #undef VMA_IMPLEMENTATION
 #endif
 
+#include <cstdlib>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/game_presets.h"
@@ -640,6 +641,12 @@ void RecordFriztiWrite(const Config& written) {
 // Between revisions the player's changes in Frizti are kept, and those another build made are
 // undone: config/frizti.ini, which only Frizti writes, holds what Frizti last wrote.
 void MainWindow::MigrateFriztiSettings() {
+    // This build keeps the player's own global and Ocarina settings exactly as they saved them:
+    // the tuned set is not applied, and per-game overrides are never reset to global.
+    if (std::getenv("EDEN_NX2_TUNED_SETTINGS") == nullptr) {
+        LOG_INFO(Frontend, "Frizti tuned settings not applied (EDEN_NX2_TUNED_SETTINGS=1 applies them)");
+        return;
+    }
     namespace Frizti = Settings::Frizti;
     const auto tuned = Frizti::TunedSettings(Settings::values);
     auto record = LoadFriztiRecord();
